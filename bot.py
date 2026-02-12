@@ -6,7 +6,7 @@ from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils.markdown import hbold, hcode
 
-TOKEN = "8333848471:AAEgwjFPv2K0zsewXDUumkLSHYzTHX_JaCw"
+TOKEN = os.environ.get("BOT_TOKEN")
 ADMINS = [972486843]
 CHANNEL_ID = -1003774797100
 
