@@ -29,8 +29,8 @@ if not TOKEN:
     print("❌ ОШИБКА: BOT_TOKEN не найден в переменных окружения!")
     sys.exit(1)
 
-ADMINS = [972486843]  # Твой ID
-CHANNEL_ID = -1003774797100  # ID канала
+ADMINS = [6038185249]  # Твой ID
+CHANNEL_ID = -1002191899171  # ID канала
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
