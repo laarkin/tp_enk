@@ -2,6 +2,7 @@ import os
 import sys
 import logging
 import asyncio
+import uuid
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -37,9 +38,9 @@ FOOTER_TEXT = (
     "✉️ <a href='https://t.me/enkspletni_bot'>Анонка</a>"
 )
 
-# ---------------- ХРАНИЛИЩЕ МЕДИА ГРУПП ----------------
+# ---------------- ХРАНИЛИЩЕ МЕДИА ГРУПП И СООБЩЕНИЙ ----------------
 media_groups = {}  # media_group_id: список сообщений
-user_messages = {}  # Хранилище сообщений пользователей
+user_messages = {}  # Хранилище сообщений пользователей {unique_id: message_data}
 channel_posts = {}  # Хранилище опубликованных постов {message_id: {'media_ids': [], 'user_counter': int, 'post_id': int}}
 
 # ---------------- Работа с ID пользователей ----------------
@@ -152,16 +153,13 @@ def set_admin_accepting(mode: bool):
         f.write("on" if mode else "off")
 
 # ---------------- КЛАВИАТУРЫ ----------------
-def admin_keyboard(user_id_counter: int, post_id: int, media_group_id: str = None):
+def admin_keyboard(user_id_counter: int, post_id: int, unique_id: str = None):
     """Клавиатура для админа с опциями публикации/отклонения"""
-    data = f"approve:{user_id_counter}:{post_id}"
-    if media_group_id:
-        data += f":{media_group_id}"
-    
+    data = f"approve:{user_id_counter}:{post_id}:{unique_id}"
     return InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="✅ Опубликовать", callback_data=data),
-            InlineKeyboardButton(text="❌ Отклонить", callback_data=f"decline:{user_id_counter}:{post_id}")
+            InlineKeyboardButton(text="❌ Отклонить", callback_data=f"decline:{user_id_counter}:{post_id}:{unique_id}")
         ]
     ])
 
@@ -514,6 +512,7 @@ async def process_media_group(media_group_id: str):
     telegram_id = group_data['user_id']
     user_id_counter = get_user_id_counter(telegram_id)
     post_id = get_next_post_id()
+    unique_id = str(uuid.uuid4())  # Уникальный ID для этого сообщения
     
     # Информация о пользователе
     user = first_msg.from_user
@@ -521,13 +520,15 @@ async def process_media_group(media_group_id: str):
     full_name = user.full_name or "Не указано"
     
     # Сохраняем информацию о медиа-группе
-    user_messages[user_id_counter] = {
+    user_messages[unique_id] = {
         'type': 'media_group',
         'media_group_id': media_group_id,
         'messages': messages,
         'caption': first_msg.caption or '',
         'user_id_counter': user_id_counter,
-        'post_id': post_id
+        'post_id': post_id,
+        'telegram_id': telegram_id,
+        'unique_id': unique_id
     }
     
     # Отправляем админам
@@ -547,6 +548,7 @@ async def process_media_group(media_group_id: str):
                 
                 "📬 **ИНФОРМАЦИЯ О ПОСТЕ:**\n"
                 f"├ 📝 Номер поста: `{post_id}`\n"
+                f"├ 🆔 Уникальный ID: `{unique_id[:8]}...`\n"
                 f"└ 🖼 Медиа в альбоме: `{len(messages)}`\n"
                 "━━━━━━━━━━━━━━━━━━━━━"
             )
@@ -615,8 +617,8 @@ async def process_media_group(media_group_id: str):
             # Отправляем кнопки отдельным сообщением
             await bot.send_message(
                 admin,
-                f"🆔 ID пользователя: `{user_id_counter}` | Пост №`{post_id}`",
-                reply_markup=admin_keyboard(user_id_counter, post_id, media_group_id),
+                f"🆔 ID пользователя: `{user_id_counter}` | Пост №`{post_id}` | Уникальный ID: `{unique_id[:8]}`",
+                reply_markup=admin_keyboard(user_id_counter, post_id, unique_id),
                 parse_mode="Markdown"
             )
             
@@ -650,32 +652,36 @@ async def user_message(message: types.Message):
     
     user_id_counter = get_user_id_counter(telegram_id)
     post_id = get_next_post_id()
+    unique_id = str(uuid.uuid4())  # Уникальный ID для этого сообщения
     
-    # Сохраняем информацию о сообщении
-    user_messages[user_id_counter] = {
+    # Сохраняем информацию о сообщении с уникальным ID
+    user_messages[unique_id] = {
         'chat_id': message.chat.id,
         'message_id': message.message_id,
         'content_type': message.content_type,
         'text': message.text or message.caption or '',
         'caption': message.caption or '',
-        'media': None
+        'user_id_counter': user_id_counter,
+        'post_id': post_id,
+        'telegram_id': telegram_id,
+        'unique_id': unique_id
     }
     
     # Для медиа сохраняем file_id
     if message.photo:
-        user_messages[user_id_counter]['media'] = message.photo[-1].file_id
+        user_messages[unique_id]['media'] = message.photo[-1].file_id
     elif message.video:
-        user_messages[user_id_counter]['media'] = message.video.file_id
+        user_messages[unique_id]['media'] = message.video.file_id
     elif message.video_note:
-        user_messages[user_id_counter]['media'] = message.video_note.file_id
+        user_messages[unique_id]['media'] = message.video_note.file_id
     elif message.document:
-        user_messages[user_id_counter]['media'] = message.document.file_id
+        user_messages[unique_id]['media'] = message.document.file_id
     elif message.voice:
-        user_messages[user_id_counter]['media'] = message.voice.file_id
+        user_messages[unique_id]['media'] = message.voice.file_id
     elif message.audio:
-        user_messages[user_id_counter]['media'] = message.audio.file_id
+        user_messages[unique_id]['media'] = message.audio.file_id
     elif message.animation:
-        user_messages[user_id_counter]['media'] = message.animation.file_id
+        user_messages[unique_id]['media'] = message.animation.file_id
     
     # Информация о пользователе
     user = message.from_user
@@ -698,6 +704,7 @@ async def user_message(message: types.Message):
                 
                 "📬 **ИНФОРМАЦИЯ О ПОСТЕ:**\n"
                 f"├ 📝 Номер поста: `{post_id}`\n"
+                f"├ 🆔 Уникальный ID: `{unique_id[:8]}...`\n"
                 f"└ 📎 Тип: `{message.content_type}`\n"
                 "━━━━━━━━━━━━━━━━━━━━━"
             )
@@ -709,7 +716,7 @@ async def user_message(message: types.Message):
                 chat_id=admin,
                 from_chat_id=message.chat.id,
                 message_id=message.message_id,
-                reply_markup=admin_keyboard(user_id_counter, post_id)
+                reply_markup=admin_keyboard(user_id_counter, post_id, unique_id)
             )
         except Exception as e:
             logging.error(f"Ошибка отправки админу {admin}: {e}")
@@ -721,13 +728,13 @@ async def user_message(message: types.Message):
 async def approve(cb: types.CallbackQuery):
     try:
         data = cb.data.split(":")
-        if len(data) < 3:
+        if len(data) < 4:
             await cb.answer("❌ Ошибка в данных")
             return
             
         user_id_counter = int(data[1])
         post_id = int(data[2])
-        media_group_id = data[3] if len(data) > 3 else None
+        unique_id = data[3]
     except (IndexError, ValueError):
         await cb.answer("❌ Ошибка в данных")
         return
@@ -737,9 +744,10 @@ async def approve(cb: types.CallbackQuery):
         await cb.answer("❌ Пользователь не найден")
         return
     
-    user_msg = user_messages.get(user_id_counter)
+    # Получаем сообщение по уникальному ID
+    user_msg = user_messages.get(unique_id)
     if not user_msg:
-        await cb.answer("❌ Сообщение не найдено")
+        await cb.answer("❌ Сообщение не найдено. Возможно, оно уже было обработано.")
         return
     
     try:
@@ -819,11 +827,13 @@ async def approve(cb: types.CallbackQuery):
                     channel_message_ids.extend([msg.message_id for msg in channel_msgs])
             
             # Сохраняем информацию о посте
-            channel_posts[channel_message_ids[0]] = {
-                'media_ids': channel_message_ids,
-                'user_counter': user_id_counter,
-                'post_id': post_id
-            }
+            if channel_message_ids:
+                channel_posts[channel_message_ids[0]] = {
+                    'media_ids': channel_message_ids,
+                    'user_counter': user_id_counter,
+                    'post_id': post_id,
+                    'unique_id': unique_id
+                }
             
             # Кнопка удаления для админа
             await cb.message.answer(
@@ -939,7 +949,8 @@ async def approve(cb: types.CallbackQuery):
                 channel_posts[channel_message_ids[0]] = {
                     'media_ids': channel_message_ids,
                     'user_counter': user_id_counter,
-                    'post_id': post_id
+                    'post_id': post_id,
+                    'unique_id': unique_id
                 }
             
             # Кнопка удаления для админа
@@ -950,6 +961,10 @@ async def approve(cb: types.CallbackQuery):
                 reply_markup=published_keyboard(channel_message_ids),
                 parse_mode="HTML"
             )
+        
+        # Удаляем сообщение из хранилища после публикации
+        if unique_id in user_messages:
+            del user_messages[unique_id]
         
         # Уведомляем пользователя
         try:
@@ -973,8 +988,13 @@ async def approve(cb: types.CallbackQuery):
 async def decline(cb: types.CallbackQuery):
     try:
         data = cb.data.split(":")
+        if len(data) < 4:
+            await cb.answer("❌ Ошибка в данных")
+            return
+            
         user_id_counter = int(data[1])
         post_id = int(data[2])
+        unique_id = data[3]
     except (IndexError, ValueError):
         await cb.answer("❌ Ошибка в данных")
         return
@@ -989,6 +1009,10 @@ async def decline(cb: types.CallbackQuery):
             )
         except:
             pass
+    
+    # Удаляем сообщение из хранилища
+    if unique_id in user_messages:
+        del user_messages[unique_id]
     
     await cb.answer("❌ Отклонено")
     await cb.message.delete()
@@ -1012,6 +1036,7 @@ async def delete_post(cb: types.CallbackQuery):
             try:
                 await bot.delete_message(CHANNEL_ID, msg_id)
                 deleted_count += 1
+                await asyncio.sleep(0.1)  # Небольшая задержка между удалениями
             except Exception as e:
                 logging.error(f"Ошибка удаления сообщения {msg_id}: {e}")
         
@@ -1039,6 +1064,22 @@ async def delete_post(cb: types.CallbackQuery):
         logging.error(f"Ошибка удаления: {e}")
         await cb.answer("❌ Ошибка при удалении")
 
+# ---------------- ПЕРИОДИЧЕСКАЯ ОЧИСТКА СТАРЫХ СООБЩЕНИЙ ----------------
+async def cleanup_old_messages():
+    """Очистка старых сообщений из хранилища (каждые 24 часа)"""
+    while True:
+        await asyncio.sleep(24 * 60 * 60)  # 24 часа
+        
+        # Очищаем старые сообщения (можно добавить логику по дате)
+        current_time = asyncio.get_event_loop().time()
+        # Простая очистка - оставляем только последние 100 сообщений
+        if len(user_messages) > 100:
+            keys_to_remove = list(user_messages.keys())[:-100]
+            for key in keys_to_remove:
+                del user_messages[key]
+        
+        logging.info(f"Очистка хранилища: осталось {len(user_messages)} сообщений")
+
 # ---------------- ЗАПУСК ----------------
 async def main():
     if not os.path.exists(ADMIN_MODE_FILE):
@@ -1048,6 +1089,9 @@ async def main():
     for admin in ADMINS:
         if admin not in user_id_map:
             get_user_id_counter(admin)
+    
+    # Запускаем задачу очистки
+    asyncio.create_task(cleanup_old_messages())
     
     print("\n" + "="*50)
     print("🤖 БОТ ЗАПУЩЕН!")
