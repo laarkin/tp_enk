@@ -17,6 +17,7 @@ else:
 USER_ID_FILE = os.path.join(DATA_DIR, "user_id_map.txt")
 POST_COUNTER_FILE = os.path.join(DATA_DIR, "post_number.txt")
 ADMIN_MODE_FILE = os.path.join(DATA_DIR, "admin_mode.txt")
+REPLY_COUNTER_FILE = os.path.join(DATA_DIR, "reply_counter.txt")
 
 # Токен из переменных окружения
 TOKEN = os.environ.get("BOT_TOKEN")
@@ -39,6 +40,7 @@ FOOTER_TEXT = (
 # ---------------- ХРАНИЛИЩЕ МЕДИА ГРУПП ----------------
 media_groups = {}  # media_group_id: список сообщений
 user_messages = {}  # Хранилище сообщений пользователей
+channel_posts = {}  # Хранилище опубликованных постов {message_id: {'media_ids': [], 'user_counter': int, 'post_id': int}}
 
 # ---------------- Работа с ID пользователей ----------------
 def load_user_id_map():
@@ -48,8 +50,10 @@ def load_user_id_map():
     with open(USER_ID_FILE, "r") as f:
         for line in f:
             if ':' in line:
-                tid, uid = line.strip().split(":")
-                mapping[int(tid)] = int(uid)
+                parts = line.strip().split(":")
+                if len(parts) == 2:
+                    tid, uid = parts
+                    mapping[int(tid)] = int(uid)
     return mapping
 
 def save_user_id_map(mapping):
@@ -59,26 +63,31 @@ def save_user_id_map(mapping):
 
 user_id_map = load_user_id_map()
 
+def get_next_user_counter():
+    """Получить следующий свободный ID пользователя"""
+    if not user_id_map:
+        return 1
+    return max(user_id_map.values()) + 1
+
 def get_user_id_counter(telegram_id: int):
+    """Получить внутренний ID пользователя, создать если нет"""
     if telegram_id in user_id_map:
         return user_id_map[telegram_id]
     
-    if user_id_map:
-        next_id = max(user_id_map.values()) + 1
-    else:
-        next_id = 1
-    
+    next_id = get_next_user_counter()
     user_id_map[telegram_id] = next_id
     save_user_id_map(user_id_map)
     return next_id
 
 def get_telegram_id_by_counter(user_counter: int):
+    """Получить Telegram ID по внутреннему ID"""
     for tid, uid in user_id_map.items():
         if uid == user_counter:
             return tid
     return None
 
 def check_duplicate_ids():
+    """Проверка на дубликаты ID"""
     global user_id_map
     values = list(user_id_map.values())
     duplicates = set()
@@ -116,6 +125,21 @@ def get_next_post_id():
         f.write(str(num + 1))
     return num
 
+# ---------------- СЧЁТЧИК ОТВЕТОВ ----------------
+def get_next_reply_id():
+    if not os.path.exists(REPLY_COUNTER_FILE):
+        with open(REPLY_COUNTER_FILE, "w") as f:
+            f.write("1")
+        return 1
+    with open(REPLY_COUNTER_FILE, "r") as f:
+        try:
+            num = int(f.read().strip())
+        except:
+            num = 1
+    with open(REPLY_COUNTER_FILE, "w") as f:
+        f.write(str(num + 1))
+    return num
+
 # ---------------- РЕЖИМ ПРИНЯТИЯ ----------------
 def is_admin_accepting() -> bool:
     if not os.path.exists(ADMIN_MODE_FILE):
@@ -128,17 +152,24 @@ def set_admin_accepting(mode: bool):
         f.write("on" if mode else "off")
 
 # ---------------- КЛАВИАТУРЫ ----------------
-def admin_keyboard(user_id_counter: int, post_id: int):
+def admin_keyboard(user_id_counter: int, post_id: int, media_group_id: str = None):
+    """Клавиатура для админа с опциями публикации/отклонения"""
+    data = f"approve:{user_id_counter}:{post_id}"
+    if media_group_id:
+        data += f":{media_group_id}"
+    
     return InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="✅ Опубликовать", callback_data=f"approve:{user_id_counter}:{post_id}"),
+            InlineKeyboardButton(text="✅ Опубликовать", callback_data=data),
             InlineKeyboardButton(text="❌ Отклонить", callback_data=f"decline:{user_id_counter}:{post_id}")
         ]
     ])
 
-def published_keyboard(message_id: int, footer_id: int = 0):
+def published_keyboard(message_ids: list):
+    """Клавиатура для удаления поста (удаляет все сообщения поста)"""
+    ids_str = ",".join(str(msg_id) for msg_id in message_ids)
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🗑 Удалить пост из канала", callback_data=f"delete:{message_id}:{footer_id}")]
+        [InlineKeyboardButton(text="🗑 Удалить пост из канала", callback_data=f"delete:{ids_str}")]
     ])
 
 # ---------------- START ----------------
@@ -150,7 +181,7 @@ async def start(message: types.Message):
         f"✨ {hbold('Привет, ' + user_name + '!')} ✨\n\n"
         f"🤫 Пиши сюда сплетни, а я анонимно отправлю их в канал\n\n"
         f"🔒 {hbold('Всё абсолютно анонимно')}\n"
-        f"📝 Просто отправь мне текст, фото или видео\n\n"
+        f"📝 Просто отправь мне текст, фото, видео или кружок\n\n"
         f"👇 Жду твои сообщения!"
     )
     
@@ -165,34 +196,37 @@ async def help_cmd(message: types.Message):
             "/stats 📊 - статистика",
             "/broadcast 📢 - рассылка",
             "/toggle_accept 🔄 - вкл/выкл прием от админа",
-            "/reply <ID> <текст> 💬 - ответ пользователю (с фото/видео)",
+            "/reply <ID> <текст> 💬 - ответ пользователю (с фото/видео/кружком)",
             "/list_users 📋 - список пользователей",
             "/check_ids ✅ - проверить ID",
             "/myid 🆔 - узнать свой ID",
             "/test_user <ID> 🧪 - тест отправки"
         ]
-        await message.answer("🔧 " + hbold("Команды админа:") + "\n\n" + "\n".join(cmds), parse_mode="HTML")
+        help_text = "🔧 " + hbold("Команды админа:") + "\n\n" + "\n".join(cmds)
+        await message.answer(help_text, parse_mode="HTML")
     else:
-        await message.answer(
+        help_text = (
             f"📱 {hbold('/start')} - начать\n"
-            f"🆔 {hbold('/myid')} - узнать свой ID",
-            parse_mode="HTML"
+            f"🆔 {hbold('/myid')} - узнать свой ID"
         )
+        await message.answer(help_text, parse_mode="HTML")
 
-# ---------------- REPLY С ПОДДЕРЖКОЙ МЕДИА ----------------
+# ---------------- REPLY С ПОДДЕРЖКОЙ ВСЕХ ТИПОВ МЕДИА ----------------
 @dp.message(Command("reply"))
 async def admin_reply(message: types.Message):
-    """Ответ пользователю с пересылкой фото/видео"""
+    """Ответ пользователю с пересылкой любого типа медиа"""
     
     if message.from_user.id not in ADMINS:
         return
     
+    # Получаем текст команды (может быть в тексте или в caption)
     command_text = message.text or message.caption
     if not command_text:
         await message.answer("❌ Не могу найти команду")
         return
     
     try:
+        # Разбираем команду
         parts = command_text.split(maxsplit=2)
         if len(parts) < 3:
             await message.answer("❌ Формат: /reply <ID> <текст>")
@@ -208,69 +242,82 @@ async def admin_reply(message: types.Message):
         await message.answer(f"❌ Ошибка: {e}")
         return
     
+    # Получаем Telegram ID пользователя
     telegram_id = get_telegram_id_by_counter(user_counter)
     
     if not telegram_id:
         await message.answer(f"❌ Пользователь с ID {user_counter} не найден")
         return
     
+    # Получаем номер ответа
+    reply_id = get_next_reply_id()
+    
     try:
+        # Отправляем ответ в зависимости от типа медиа
         if message.photo:
             photo = message.photo[-1]
             await bot.send_photo(
                 chat_id=telegram_id,
                 photo=photo.file_id,
-                caption=f"✉️ {hbold('Ответ от администратора:')}\n\n{reply_text}",
+                caption=f"✉️ {hbold('Ответ от администратора #' + str(reply_id) + ':')}\n\n{reply_text}",
                 parse_mode="HTML"
             )
-            await message.answer(f"✅ Фото отправлено #{user_counter}")
         elif message.video:
             await bot.send_video(
                 chat_id=telegram_id,
                 video=message.video.file_id,
-                caption=f"✉️ {hbold('Ответ от администратора:')}\n\n{reply_text}",
+                caption=f"✉️ {hbold('Ответ от администратора #' + str(reply_id) + ':')}\n\n{reply_text}",
                 parse_mode="HTML"
             )
-            await message.answer(f"✅ Видео отправлено #{user_counter}")
+        elif message.video_note:  # Кружочки
+            await bot.send_video_note(
+                chat_id=telegram_id,
+                video_note=message.video_note.file_id
+            )
+            # Отправляем текст отдельно, если есть
+            if reply_text:
+                await bot.send_message(
+                    chat_id=telegram_id,
+                    text=f"✉️ {hbold('Ответ от администратора #' + str(reply_id) + ':')}\n\n{reply_text}",
+                    parse_mode="HTML"
+                )
         elif message.document:
             await bot.send_document(
                 chat_id=telegram_id,
                 document=message.document.file_id,
-                caption=f"✉️ {hbold('Ответ от администратора:')}\n\n{reply_text}",
+                caption=f"✉️ {hbold('Ответ от администратора #' + str(reply_id) + ':')}\n\n{reply_text}",
                 parse_mode="HTML"
             )
-            await message.answer(f"✅ Документ отправлено #{user_counter}")
         elif message.voice:
             await bot.send_voice(
                 chat_id=telegram_id,
                 voice=message.voice.file_id,
-                caption=f"✉️ {hbold('Ответ от администратора:')}\n\n{reply_text}",
+                caption=f"✉️ {hbold('Ответ от администратора #' + str(reply_id) + ':')}\n\n{reply_text}",
                 parse_mode="HTML"
             )
-            await message.answer(f"✅ Голосовое отправлено #{user_counter}")
         elif message.audio:
             await bot.send_audio(
                 chat_id=telegram_id,
                 audio=message.audio.file_id,
-                caption=f"✉️ {hbold('Ответ от администратора:')}\n\n{reply_text}",
+                caption=f"✉️ {hbold('Ответ от администратора #' + str(reply_id) + ':')}\n\n{reply_text}",
                 parse_mode="HTML"
             )
-            await message.answer(f"✅ Аудио отправлено #{user_counter}")
         elif message.animation:
             await bot.send_animation(
                 chat_id=telegram_id,
                 animation=message.animation.file_id,
-                caption=f"✉️ {hbold('Ответ от администратора:')}\n\n{reply_text}",
+                caption=f"✉️ {hbold('Ответ от администратора #' + str(reply_id) + ':')}\n\n{reply_text}",
                 parse_mode="HTML"
             )
-            await message.answer(f"✅ GIF отправлено #{user_counter}")
         else:
+            # Текстовое сообщение
             await bot.send_message(
                 chat_id=telegram_id,
-                text=f"✉️ {hbold('Ответ от администратора:')}\n\n{reply_text}",
+                text=f"✉️ {hbold('Ответ от администратора #' + str(reply_id) + ':')}\n\n{reply_text}",
                 parse_mode="HTML"
             )
-            await message.answer(f"✅ Текст отправлен #{user_counter}")
+        
+        await message.answer(f"✅ Ответ #{reply_id} отправлен пользователю #{user_counter}")
         
     except Exception as e:
         await message.answer(f"❌ Ошибка отправки: {e}")
@@ -417,10 +464,10 @@ async def broadcast(message: types.Message):
         parse_mode="HTML"
     )
 
-# ---------------- ИСПРАВЛЕННАЯ ОБРАБОТКА МЕДИА ГРУПП (АЛЬБОМОВ) ----------------
+# ---------------- ОБРАБОТКА МЕДИА ГРУПП (АЛЬБОМОВ) ----------------
 @dp.message(F.media_group_id)
 async def handle_media_group(message: types.Message):
-    """Обработка альбомов (несколько фото/видео)"""
+    """Обработка альбомов (несколько фото/видео/кружков)"""
     
     telegram_id = message.from_user.id
     
@@ -543,8 +590,25 @@ async def process_media_group(media_group_id: str):
                                 media=file_id
                             )
                         )
+                elif msg.video_note:  # Кружочки нельзя отправить в медиагруппе
+                    # Отправляем кружок отдельно
+                    if i == 0:
+                        await bot.send_video_note(
+                            admin,
+                            video_note=msg.video_note.file_id
+                        )
+                        if first_msg.caption:
+                            await bot.send_message(
+                                admin,
+                                f"📝 Подпись: {first_msg.caption}"
+                            )
+                    else:
+                        await bot.send_video_note(
+                            admin,
+                            video_note=msg.video_note.file_id
+                        )
             
-            # Отправляем ВЕСЬ альбом одним сообщением
+            # Отправляем медиа-группу если она есть
             if media_group:
                 await bot.send_media_group(admin, media_group)
             
@@ -552,7 +616,7 @@ async def process_media_group(media_group_id: str):
             await bot.send_message(
                 admin,
                 f"🆔 ID пользователя: `{user_id_counter}` | Пост №`{post_id}`",
-                reply_markup=admin_keyboard(user_id_counter, post_id),
+                reply_markup=admin_keyboard(user_id_counter, post_id, media_group_id),
                 parse_mode="Markdown"
             )
             
@@ -566,7 +630,7 @@ async def process_media_group(media_group_id: str):
     del media_groups[media_group_id]
 
 # ---------------- ОБРАБОТКА ОДИНОЧНЫХ СООБЩЕНИЙ ----------------
-@dp.message(F.text | F.photo | F.video | F.document | F.voice | F.audio | F.animation)
+@dp.message(F.text | F.photo | F.video | F.video_note | F.document | F.voice | F.audio | F.animation)
 async def user_message(message: types.Message):
     """Обработчик одиночных сообщений от пользователей"""
     
@@ -602,6 +666,8 @@ async def user_message(message: types.Message):
         user_messages[user_id_counter]['media'] = message.photo[-1].file_id
     elif message.video:
         user_messages[user_id_counter]['media'] = message.video.file_id
+    elif message.video_note:
+        user_messages[user_id_counter]['media'] = message.video_note.file_id
     elif message.document:
         user_messages[user_id_counter]['media'] = message.document.file_id
     elif message.voice:
@@ -631,7 +697,8 @@ async def user_message(message: types.Message):
                 f"└ 🔗 Username: {username}\n\n"
                 
                 "📬 **ИНФОРМАЦИЯ О ПОСТЕ:**\n"
-                f"└ 📝 Номер поста: `{post_id}`\n"
+                f"├ 📝 Номер поста: `{post_id}`\n"
+                f"└ 📎 Тип: `{message.content_type}`\n"
                 "━━━━━━━━━━━━━━━━━━━━━"
             )
             
@@ -660,6 +727,7 @@ async def approve(cb: types.CallbackQuery):
             
         user_id_counter = int(data[1])
         post_id = int(data[2])
+        media_group_id = data[3] if len(data) > 3 else None
     except (IndexError, ValueError):
         await cb.answer("❌ Ошибка в данных")
         return
@@ -676,6 +744,7 @@ async def approve(cb: types.CallbackQuery):
     
     try:
         footer = f"\n\n{FOOTER_TEXT}"
+        channel_message_ids = []
         
         # Проверяем, это альбом или одиночное сообщение
         if user_msg.get('type') == 'media_group':
@@ -686,64 +755,91 @@ async def approve(cb: types.CallbackQuery):
             # Сортируем сообщения по дате
             messages.sort(key=lambda x: x.date)
             
-            for i, msg in enumerate(messages):
-                if msg.photo:
-                    file_id = msg.photo[-1].file_id
-                    if i == 0:
-                        # Только первое медиа с подписью и футером
-                        caption = msg.caption or ""
-                        caption += footer
-                        media_group.append(
-                            types.InputMediaPhoto(
-                                media=file_id,
-                                caption=caption,
-                                parse_mode="HTML"
-                            )
-                        )
-                    else:
-                        media_group.append(
-                            types.InputMediaPhoto(
-                                media=file_id
-                            )
-                        )
-                elif msg.video:
-                    file_id = msg.video.file_id
-                    if i == 0:
-                        caption = msg.caption or ""
-                        caption += footer
-                        media_group.append(
-                            types.InputMediaVideo(
-                                media=file_id,
-                                caption=caption,
-                                parse_mode="HTML"
-                            )
-                        )
-                    else:
-                        media_group.append(
-                            types.InputMediaVideo(
-                                media=file_id
-                            )
-                        )
+            # Сначала отправляем все кружочки отдельно (они не поддерживаются в медиагруппе)
+            video_notes = []
+            regular_media = []
             
-            # Отправляем ВЕСЬ альбом в канал одним сообщением
-            if media_group:
-                channel_msgs = await bot.send_media_group(CHANNEL_ID, media_group)
-                
-                # Кнопка удаления для админа
-                await cb.message.answer(
-                    f"✅ {hbold('Альбом опубликован!')}\n\n"
-                    f"📝 Номер поста: {hcode(str(post_id))}\n"
-                    f"🆔 ID пользователя: {hcode(str(user_id_counter))}\n"
-                    f"🖼 Количество медиа: {len(messages)}",
-                    reply_markup=published_keyboard(channel_msgs[0].message_id),
-                    parse_mode="HTML"
+            for msg in messages:
+                if msg.video_note:
+                    video_notes.append(msg)
+                else:
+                    regular_media.append(msg)
+            
+            # Отправляем кружочки
+            for vn in video_notes:
+                vn_msg = await bot.send_video_note(
+                    chat_id=CHANNEL_ID,
+                    video_note=vn.video_note.file_id
                 )
-            else:
-                await cb.answer("❌ Нет медиа в альбоме")
-                return
+                channel_message_ids.append(vn_msg.message_id)
+            
+            # Отправляем обычные медиа группой
+            if regular_media:
+                for i, msg in enumerate(regular_media):
+                    if msg.photo:
+                        file_id = msg.photo[-1].file_id
+                        if i == 0:
+                            # Только первое медиа с подписью и футером
+                            caption = msg.caption or ""
+                            caption += footer
+                            media_group.append(
+                                types.InputMediaPhoto(
+                                    media=file_id,
+                                    caption=caption,
+                                    parse_mode="HTML"
+                                )
+                            )
+                        else:
+                            media_group.append(
+                                types.InputMediaPhoto(
+                                    media=file_id
+                                )
+                            )
+                    elif msg.video:
+                        file_id = msg.video.file_id
+                        if i == 0:
+                            caption = msg.caption or ""
+                            caption += footer
+                            media_group.append(
+                                types.InputMediaVideo(
+                                    media=file_id,
+                                    caption=caption,
+                                    parse_mode="HTML"
+                                )
+                            )
+                        else:
+                            media_group.append(
+                                types.InputMediaVideo(
+                                    media=file_id
+                                )
+                            )
+                
+                if media_group:
+                    channel_msgs = await bot.send_media_group(CHANNEL_ID, media_group)
+                    channel_message_ids.extend([msg.message_id for msg in channel_msgs])
+            
+            # Сохраняем информацию о посте
+            channel_posts[channel_message_ids[0]] = {
+                'media_ids': channel_message_ids,
+                'user_counter': user_id_counter,
+                'post_id': post_id
+            }
+            
+            # Кнопка удаления для админа
+            await cb.message.answer(
+                f"✅ {hbold('Альбом опубликован!')}\n\n"
+                f"📝 Номер поста: {hcode(str(post_id))}\n"
+                f"🆔 ID пользователя: {hcode(str(user_id_counter))}\n"
+                f"🖼 Количество медиа: {len(messages)}\n"
+                f"📎 Сообщений в канале: {len(channel_message_ids)}",
+                reply_markup=published_keyboard(channel_message_ids),
+                parse_mode="HTML"
+            )
             
         else:
             # Публикуем одиночное сообщение
+            channel_msg = None
+            
             if user_msg['content_type'] == 'text':
                 channel_msg = await bot.send_message(
                     CHANNEL_ID,
@@ -751,6 +847,8 @@ async def approve(cb: types.CallbackQuery):
                     parse_mode="HTML",
                     disable_web_page_preview=True
                 )
+                channel_message_ids = [channel_msg.message_id]
+                
             elif user_msg['content_type'] == 'photo':
                 caption = user_msg['caption'] or ""
                 caption += footer
@@ -760,6 +858,8 @@ async def approve(cb: types.CallbackQuery):
                     caption=caption,
                     parse_mode="HTML"
                 )
+                channel_message_ids = [channel_msg.message_id]
+                
             elif user_msg['content_type'] == 'video':
                 caption = user_msg['caption'] or ""
                 caption += footer
@@ -769,6 +869,23 @@ async def approve(cb: types.CallbackQuery):
                     caption=caption,
                     parse_mode="HTML"
                 )
+                channel_message_ids = [channel_msg.message_id]
+                
+            elif user_msg['content_type'] == 'video_note':
+                channel_msg = await bot.send_video_note(
+                    chat_id=CHANNEL_ID,
+                    video_note=user_msg['media']
+                )
+                channel_message_ids = [channel_msg.message_id]
+                # Отправляем подпись отдельно если есть
+                if user_msg['caption']:
+                    caption_msg = await bot.send_message(
+                        CHANNEL_ID,
+                        user_msg['caption'] + footer,
+                        parse_mode="HTML"
+                    )
+                    channel_message_ids.append(caption_msg.message_id)
+                    
             elif user_msg['content_type'] == 'document':
                 caption = user_msg['caption'] or ""
                 caption += footer
@@ -778,6 +895,8 @@ async def approve(cb: types.CallbackQuery):
                     caption=caption,
                     parse_mode="HTML"
                 )
+                channel_message_ids = [channel_msg.message_id]
+                
             elif user_msg['content_type'] == 'voice':
                 caption = user_msg['caption'] or ""
                 caption += footer
@@ -787,6 +906,8 @@ async def approve(cb: types.CallbackQuery):
                     caption=caption,
                     parse_mode="HTML"
                 )
+                channel_message_ids = [channel_msg.message_id]
+                
             elif user_msg['content_type'] == 'audio':
                 caption = user_msg['caption'] or ""
                 caption += footer
@@ -796,6 +917,8 @@ async def approve(cb: types.CallbackQuery):
                     caption=caption,
                     parse_mode="HTML"
                 )
+                channel_message_ids = [channel_msg.message_id]
+                
             elif user_msg['content_type'] == 'animation':
                 caption = user_msg['caption'] or ""
                 caption += footer
@@ -805,16 +928,26 @@ async def approve(cb: types.CallbackQuery):
                     caption=caption,
                     parse_mode="HTML"
                 )
+                channel_message_ids = [channel_msg.message_id]
+                
             else:
                 await cb.answer("❌ Неподдерживаемый тип сообщения")
                 return
+            
+            # Сохраняем информацию о посте
+            if channel_message_ids:
+                channel_posts[channel_message_ids[0]] = {
+                    'media_ids': channel_message_ids,
+                    'user_counter': user_id_counter,
+                    'post_id': post_id
+                }
             
             # Кнопка удаления для админа
             await cb.message.answer(
                 f"✅ {hbold('Пост опубликован!')}\n\n"
                 f"📝 Номер поста: {hcode(str(post_id))}\n"
                 f"🆔 ID пользователя: {hcode(str(user_id_counter))}",
-                reply_markup=published_keyboard(channel_msg.message_id),
+                reply_markup=published_keyboard(channel_message_ids),
                 parse_mode="HTML"
             )
         
@@ -860,34 +993,48 @@ async def decline(cb: types.CallbackQuery):
     await cb.answer("❌ Отклонено")
     await cb.message.delete()
 
-# ---------------- УДАЛЕНИЕ ----------------
+# ---------------- УДАЛЕНИЕ ВСЕГО ПОСТА ----------------
 @dp.callback_query(F.data.startswith("delete"))
-async def delete(cb: types.CallbackQuery):
+async def delete_post(cb: types.CallbackQuery):
+    """Удаление всего поста из канала (всех связанных сообщений)"""
     try:
         parts = cb.data.split(":")
-        if len(parts) >= 2:
-            channel_msg_id = int(parts[1])
-            await bot.delete_message(CHANNEL_ID, channel_msg_id)
-            
-            if len(parts) >= 3 and parts[2] != '0':
-                try:
-                    await bot.delete_message(CHANNEL_ID, int(parts[2]))
-                except:
-                    pass
-            
-            await cb.answer("🗑 Удалено")
-            
-            if cb.message:
-                try:
-                    await cb.message.edit_text(
-                        f"{cb.message.text}\n\n❌ {hbold('Пост удален из канала')}",
-                        reply_markup=None,
-                        parse_mode="HTML"
-                    )
-                except:
-                    pass
-        else:
+        if len(parts) < 2:
             await cb.answer("❌ Ошибка в данных")
+            return
+        
+        # Получаем список ID сообщений для удаления
+        ids_str = parts[1]
+        message_ids = [int(msg_id) for msg_id in ids_str.split(",") if msg_id]
+        
+        deleted_count = 0
+        for msg_id in message_ids:
+            try:
+                await bot.delete_message(CHANNEL_ID, msg_id)
+                deleted_count += 1
+            except Exception as e:
+                logging.error(f"Ошибка удаления сообщения {msg_id}: {e}")
+        
+        # Очищаем информацию о посте из хранилища
+        if message_ids:
+            for msg_id in message_ids:
+                if msg_id in channel_posts:
+                    del channel_posts[msg_id]
+                    break
+        
+        await cb.answer(f"🗑 Удалено {deleted_count} сообщений")
+        
+        # Обновляем сообщение у админа
+        if cb.message:
+            try:
+                await cb.message.edit_text(
+                    f"{cb.message.text}\n\n❌ {hbold('Пост удален из канала')} (удалено {deleted_count} сообщений)",
+                    reply_markup=None,
+                    parse_mode="HTML"
+                )
+            except:
+                pass
+                
     except Exception as e:
         logging.error(f"Ошибка удаления: {e}")
         await cb.answer("❌ Ошибка при удалении")
