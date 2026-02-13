@@ -38,7 +38,7 @@ ADMIN_MODE_FILE = "admin_mode.txt"
 
 FOOTER_TEXT = (
     "────────────\n"
-    "📺 <a href='https://t.me/perehodniknaspletni'>Канал</a> |\n"
+    "📺 <a href='https://t.me/perehodniknaspletni'>Канал</a>\n"
     "✉️ <a href='https://t.me/enkspletni_bot'>Анонка</a>"
 )
 
@@ -151,7 +151,7 @@ async def start(message: types.Message):
     welcome_text = (
         f"✨ {hbold('Привет, ' + user_name + '!')} ✨\n\n"
         f"🤫 Пиши сюда сплетни, а я анонимно отправлю их в канал\n\n"
-        f"🔒 {hbold('Всё абсолютно анонимно')} — можешь не переживать!\n"
+        f"🔒 {hbold('Всё абсолютно анонимно')}\n"
         f"📝 Просто отправь мне текст, фото или видео\n\n"
         f"👇 Жду твои сообщения!"
     )
