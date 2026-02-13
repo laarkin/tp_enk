@@ -14,6 +14,8 @@ else:
     DATA_DIR = '.'
 
 # Пути к файлам с данными
+DATA_DIR = '/app/data'  # Путь к Volume
+
 USER_ID_FILE = os.path.join(DATA_DIR, "user_id_map.txt")
 POST_COUNTER_FILE = os.path.join(DATA_DIR, "post_number.txt")
 ADMIN_MODE_FILE = os.path.join(DATA_DIR, "admin_mode.txt")
