@@ -4,12 +4,14 @@ import logging
 import asyncio
 import uuid
 import time
+import fcntl
 from datetime import datetime
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto, InputMediaVideo
 from aiogram.utils.markdown import hbold, hcode
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest, TelegramConflictError
+from contextlib import contextmanager
 
 # Определяем папку для данных (Railway volume)
 if os.path.exists('/app/data'):
@@ -22,6 +24,7 @@ USER_ID_FILE = os.path.join(DATA_DIR, "user_id_map.txt")
 POST_COUNTER_FILE = os.path.join(DATA_DIR, "post_number.txt")
 ADMIN_MODE_FILE = os.path.join(DATA_DIR, "admin_mode.txt")
 REPLY_COUNTER_FILE = os.path.join(DATA_DIR, "reply_counter.txt")
+LOCK_FILE = os.path.join(DATA_DIR, "bot.lock")  # Файл блокировки
 
 # Токен из переменных окружения
 TOKEN = os.environ.get("BOT_TOKEN")
@@ -29,8 +32,41 @@ if not TOKEN:
     print("❌ ОШИБКА: BOT_TOKEN не найден в переменных окружения!")
     sys.exit(1)
 
-ADMINS = [6038185249]  # Твой ID
-CHANNEL_ID = -1002191899171  # ID канала
+ADMINS = [972486843]  # Твой ID
+CHANNEL_ID = -1003774797100  # ID канала
+
+# ---------------- ЗАЩИТА ОТ МНОЖЕСТВЕННЫХ ЗАПУСКОВ ----------------
+def acquire_lock():
+    """Создает файл блокировки для предотвращения множественных запусков"""
+    try:
+        # Пытаемся открыть файл для блокировки
+        lock_file = open(LOCK_FILE, 'w')
+        # Пробуем получить эксклюзивную блокировку
+        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        # Записываем PID процесса
+        lock_file.write(str(os.getpid()))
+        lock_file.flush()
+        return lock_file
+    except (IOError, OSError):
+        # Не удалось получить блокировку - другой экземпляр уже запущен
+        return None
+
+def release_lock(lock_file):
+    """Освобождает файл блокировки"""
+    if lock_file:
+        try:
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
+            lock_file.close()
+            os.unlink(LOCK_FILE)
+        except:
+            pass
+
+# ---------------- ИНИЦИАЛИЗАЦИЯ БОТА С ЗАЩИТОЙ ----------------
+lock_file = acquire_lock()
+if not lock_file:
+    print("❌ ОШИБКА: Бот уже запущен в другом экземпляре!")
+    print("   Если вы уверены, что это ошибка, удалите файл:", LOCK_FILE)
+    sys.exit(1)
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
@@ -42,29 +78,35 @@ FOOTER_TEXT = (
 )
 
 # ---------------- ХРАНИЛИЩЕ МЕДИА ГРУПП И СООБЩЕНИЙ ----------------
-media_groups = {}  # media_group_id: список сообщений
-user_messages = {}  # Хранилище сообщений пользователей {unique_id: message_data}
-channel_posts = {}  # Хранилище опубликованных постов {group_id: {'message_ids': [], 'user_counter': int, 'post_id': int}}
+media_groups = {}
+user_messages = {}
+channel_posts = {}
 
 # ---------------- Работа с ID пользователей ----------------
 def load_user_id_map():
     if not os.path.exists(USER_ID_FILE):
         return {}
     mapping = {}
-    with open(USER_ID_FILE, "r") as f:
-        for line in f:
-            line = line.strip()
-            if ':' in line:
-                parts = line.split(":")
-                if len(parts) == 2:
-                    tid, uid = parts
-                    mapping[int(tid)] = int(uid)
+    try:
+        with open(USER_ID_FILE, "r") as f:
+            for line in f:
+                line = line.strip()
+                if ':' in line:
+                    parts = line.split(":")
+                    if len(parts) == 2:
+                        tid, uid = parts
+                        mapping[int(tid)] = int(uid)
+    except Exception as e:
+        logging.error(f"Ошибка загрузки user_id_map: {e}")
     return mapping
 
 def save_user_id_map(mapping):
-    with open(USER_ID_FILE, "w") as f:
-        for tid, uid in mapping.items():
-            f.write(f"{tid}:{uid}\n")
+    try:
+        with open(USER_ID_FILE, "w") as f:
+            for tid, uid in mapping.items():
+                f.write(f"{tid}:{uid}\n")
+    except Exception as e:
+        logging.error(f"Ошибка сохранения user_id_map: {e}")
 
 user_id_map = load_user_id_map()
 
@@ -72,11 +114,9 @@ def get_next_user_counter():
     """Получить следующий свободный ID пользователя"""
     if not user_id_map:
         return 1
-    # Проверяем на дубликаты и находим максимальный
     used_ids = set(user_id_map.values())
     if not used_ids:
         return 1
-    # Ищем первый свободный ID
     for i in range(1, max(used_ids) + 2):
         if i not in used_ids:
             return i
@@ -84,7 +124,6 @@ def get_next_user_counter():
 
 def get_user_id_counter(telegram_id: int):
     """Получить внутренний ID пользователя, создать если нет"""
-    # Проверяем дубликаты перед назначением нового ID
     check_duplicate_ids()
     
     if telegram_id in user_id_map:
@@ -106,14 +145,12 @@ def check_duplicate_ids():
     """Проверка и исправление дубликатов ID"""
     global user_id_map
     
-    # Проверяем дубликаты среди значений
     value_to_keys = {}
     for tid, uid in user_id_map.items():
         if uid not in value_to_keys:
             value_to_keys[uid] = []
         value_to_keys[uid].append(tid)
     
-    # Если есть дубликаты
     duplicates_found = False
     for uid, tids in value_to_keys.items():
         if len(tids) > 1:
@@ -121,7 +158,6 @@ def check_duplicate_ids():
             break
     
     if duplicates_found:
-        # Создаем новую мапу с уникальными ID
         new_mapping = {}
         next_id = 1
         for tid in user_id_map.keys():
@@ -132,49 +168,62 @@ def check_duplicate_ids():
     
     return user_id_map
 
-# Проверяем дубликаты при загрузке
 user_id_map = check_duplicate_ids()
 
 # ---------------- СЧЁТЧИК ПОСТОВ ----------------
 def get_next_post_id():
-    if not os.path.exists(POST_COUNTER_FILE):
+    try:
+        if not os.path.exists(POST_COUNTER_FILE):
+            with open(POST_COUNTER_FILE, "w") as f:
+                f.write("1")
+            return 1
+        with open(POST_COUNTER_FILE, "r") as f:
+            try:
+                num = int(f.read().strip())
+            except:
+                num = 1
         with open(POST_COUNTER_FILE, "w") as f:
-            f.write("1")
+            f.write(str(num + 1))
+        return num
+    except Exception as e:
+        logging.error(f"Ошибка счетчика постов: {e}")
         return 1
-    with open(POST_COUNTER_FILE, "r") as f:
-        try:
-            num = int(f.read().strip())
-        except:
-            num = 1
-    with open(POST_COUNTER_FILE, "w") as f:
-        f.write(str(num + 1))
-    return num
 
 # ---------------- СЧЁТЧИК ОТВЕТОВ ----------------
 def get_next_reply_id():
-    if not os.path.exists(REPLY_COUNTER_FILE):
+    try:
+        if not os.path.exists(REPLY_COUNTER_FILE):
+            with open(REPLY_COUNTER_FILE, "w") as f:
+                f.write("1")
+            return 1
+        with open(REPLY_COUNTER_FILE, "r") as f:
+            try:
+                num = int(f.read().strip())
+            except:
+                num = 1
         with open(REPLY_COUNTER_FILE, "w") as f:
-            f.write("1")
+            f.write(str(num + 1))
+        return num
+    except Exception as e:
+        logging.error(f"Ошибка счетчика ответов: {e}")
         return 1
-    with open(REPLY_COUNTER_FILE, "r") as f:
-        try:
-            num = int(f.read().strip())
-        except:
-            num = 1
-    with open(REPLY_COUNTER_FILE, "w") as f:
-        f.write(str(num + 1))
-    return num
 
 # ---------------- РЕЖИМ ПРИНЯТИЯ ----------------
 def is_admin_accepting() -> bool:
     if not os.path.exists(ADMIN_MODE_FILE):
         return True
-    with open(ADMIN_MODE_FILE, "r") as f:
-        return f.read().strip() == "on"
+    try:
+        with open(ADMIN_MODE_FILE, "r") as f:
+            return f.read().strip() == "on"
+    except:
+        return True
 
 def set_admin_accepting(mode: bool):
-    with open(ADMIN_MODE_FILE, "w") as f:
-        f.write("on" if mode else "off")
+    try:
+        with open(ADMIN_MODE_FILE, "w") as f:
+            f.write("on" if mode else "off")
+    except Exception as e:
+        logging.error(f"Ошибка установки режима: {e}")
 
 # ---------------- КЛАВИАТУРЫ ----------------
 def admin_keyboard(user_id_counter: int, post_id: int, unique_id: str = None):
@@ -242,14 +291,12 @@ async def admin_reply(message: types.Message):
     if message.from_user.id not in ADMINS:
         return
     
-    # Получаем текст команды (может быть в тексте или в caption)
     command_text = message.text or message.caption
     if not command_text:
         await message.answer("❌ Не могу найти команду")
         return
     
     try:
-        # Разбираем команду
         parts = command_text.split(maxsplit=2)
         if len(parts) < 3:
             await message.answer("❌ Формат: /reply <ID> <текст>")
@@ -265,11 +312,9 @@ async def admin_reply(message: types.Message):
         await message.answer(f"❌ Ошибка: {e}")
         return
     
-    # Получаем Telegram ID пользователя
     telegram_id = get_telegram_id_by_counter(user_counter)
     
     if not telegram_id:
-        # Показываем доступные ID для справки
         available_ids = sorted(user_id_map.values())
         ids_text = ", ".join(str(uid) for uid in available_ids[:20])
         if len(available_ids) > 20:
@@ -282,14 +327,11 @@ async def admin_reply(message: types.Message):
         )
         return
     
-    # Получаем номер ответа
     reply_id = get_next_reply_id()
     
     try:
-        # Формируем текст ответа
         reply_header = f"✉️ {hbold('Ответ от администратора #' + str(reply_id) + ':')}\n\n"
         
-        # Отправляем ответ в зависимости от типа медиа
         if message.photo:
             photo = message.photo[-1]
             await bot.send_photo(
@@ -345,7 +387,6 @@ async def admin_reply(message: types.Message):
                 parse_mode="HTML"
             )
         else:
-            # Текстовое сообщение
             await bot.send_message(
                 chat_id=telegram_id,
                 text=f"{reply_header}{reply_text}",
@@ -526,7 +567,6 @@ async def handle_media_group(message: types.Message):
     
     telegram_id = message.from_user.id
     
-    # Админ с выключенным приемом - игнор
     if telegram_id in ADMINS and not is_admin_accepting():
         return
     
@@ -570,7 +610,6 @@ async def process_media_group(media_group_id: str):
     username = f"@{user.username}" if user.username else "❌ Нет username"
     full_name = user.full_name or "Не указано"
     
-    # Сохраняем информацию о медиа-группе
     user_messages[unique_id] = {
         'type': 'media_group',
         'media_group_id': media_group_id,
@@ -604,7 +643,6 @@ async def process_media_group(media_group_id: str):
             
             await bot.send_message(admin, text, parse_mode="Markdown")
             
-            # Создаем медиа-группу для отправки
             media_group = []
             
             for i, msg in enumerate(messages):
@@ -776,53 +814,58 @@ async def approve(cb: types.CallbackQuery):
             messages = user_msg['messages']
             messages.sort(key=lambda x: x.date)
             
-            # Отправляем одним альбомом все медиа
             media_group = []
+            video_notes = []
             
-            for i, msg in enumerate(messages):
-                if msg.photo:
-                    file_id = msg.photo[-1].file_id
-                    if i == 0:
-                        caption = msg.caption or ""
-                        caption += f"\n\n{FOOTER_TEXT}"
-                        media_group.append(
-                            InputMediaPhoto(
-                                media=file_id,
-                                caption=caption,
-                                parse_mode="HTML"
+            # Разделяем кружочки и остальные медиа
+            for msg in messages:
+                if msg.video_note:
+                    video_notes.append(msg)
+                elif msg.photo or msg.video:
+                    if msg.photo:
+                        file_id = msg.photo[-1].file_id
+                        if not media_group:
+                            caption = msg.caption or ""
+                            caption += f"\n\n{FOOTER_TEXT}"
+                            media_group.append(
+                                InputMediaPhoto(
+                                    media=file_id,
+                                    caption=caption,
+                                    parse_mode="HTML"
+                                )
                             )
-                        )
-                    else:
-                        media_group.append(
-                            InputMediaPhoto(
-                                media=file_id
+                        else:
+                            media_group.append(
+                                InputMediaPhoto(
+                                    media=file_id
+                                )
                             )
-                        )
-                elif msg.video:
-                    file_id = msg.video.file_id
-                    if i == 0:
-                        caption = msg.caption or ""
-                        caption += f"\n\n{FOOTER_TEXT}"
-                        media_group.append(
-                            InputMediaVideo(
-                                media=file_id,
-                                caption=caption,
-                                parse_mode="HTML"
+                    elif msg.video:
+                        file_id = msg.video.file_id
+                        if not media_group:
+                            caption = msg.caption or ""
+                            caption += f"\n\n{FOOTER_TEXT}"
+                            media_group.append(
+                                InputMediaVideo(
+                                    media=file_id,
+                                    caption=caption,
+                                    parse_mode="HTML"
+                                )
                             )
-                        )
-                    else:
-                        media_group.append(
-                            InputMediaVideo(
-                                media=file_id
+                        else:
+                            media_group.append(
+                                InputMediaVideo(
+                                    media=file_id
+                                )
                             )
-                        )
-                elif msg.video_note:
-                    # Видеосообщения (кружочки) отправляем отдельно
-                    vn_msg = await bot.send_video_note(
-                        chat_id=CHANNEL_ID,
-                        video_note=msg.video_note.file_id
-                    )
-                    channel_message_ids.append(vn_msg.message_id)
+            
+            # Отправляем кружочки
+            for vn in video_notes:
+                vn_msg = await bot.send_video_note(
+                    chat_id=CHANNEL_ID,
+                    video_note=vn.video_note.file_id
+                )
+                channel_message_ids.append(vn_msg.message_id)
             
             # Отправляем медиа-группу
             if media_group:
@@ -852,7 +895,6 @@ async def approve(cb: types.CallbackQuery):
             footer = f"\n\n{FOOTER_TEXT}"
             
             if user_msg['content_type'] == 'video_note':
-                # Видеосообщение
                 channel_msg = await bot.send_video_note(
                     chat_id=CHANNEL_ID,
                     video_note=user_msg['media']
@@ -867,7 +909,6 @@ async def approve(cb: types.CallbackQuery):
                     )
                     channel_message_ids.append(caption_msg.message_id)
             else:
-                # Остальные типы
                 if user_msg['content_type'] == 'text':
                     channel_msg = await bot.send_message(
                         CHANNEL_ID,
@@ -935,7 +976,6 @@ async def approve(cb: types.CallbackQuery):
                 
                 channel_message_ids.append(channel_msg.message_id)
             
-            # Сохраняем информацию о посте
             if channel_message_ids:
                 channel_posts[post_group_id] = {
                     'message_ids': channel_message_ids,
@@ -952,11 +992,9 @@ async def approve(cb: types.CallbackQuery):
                 parse_mode="HTML"
             )
         
-        # Удаляем из хранилища
         if unique_id in user_messages:
             del user_messages[unique_id]
         
-        # Уведомляем пользователя
         try:
             await bot.send_message(
                 telegram_id,
@@ -1034,7 +1072,6 @@ async def delete_post(cb: types.CallbackQuery):
             except Exception as e:
                 logging.error(f"Ошибка удаления сообщения {msg_id}: {e}")
         
-        # Удаляем из хранилища
         del channel_posts[post_group_id]
         
         await cb.answer(f"🗑 Удалено {deleted_count} сообщений")
@@ -1059,40 +1096,50 @@ async def cleanup_old_messages():
     while True:
         await asyncio.sleep(24 * 60 * 60)
         
-        # Очищаем user_messages
         if len(user_messages) > 100:
             keys_to_remove = list(user_messages.keys())[:-100]
             for key in keys_to_remove:
                 del user_messages[key]
         
-        # Очищаем старые посты (старше 7 дней)
-        # Здесь можно добавить логику по дате
-        
         logging.info(f"Очистка хранилища: {len(user_messages)} сообщений, {len(channel_posts)} постов")
 
 # ---------------- ЗАПУСК ----------------
 async def main():
-    if not os.path.exists(ADMIN_MODE_FILE):
-        set_admin_accepting(True)
-    
-    # Регистрируем админов
-    for admin in ADMINS:
-        if admin not in user_id_map:
-            get_user_id_counter(admin)
-    
-    asyncio.create_task(cleanup_old_messages())
-    
-    print("\n" + "="*50)
-    print("🤖 БОТ ЗАПУЩЕН!")
-    print("="*50)
-    print(f"👤 Админы: {ADMINS}")
-    print(f"📢 Канал: {CHANNEL_ID}")
-    print(f"👥 Пользователей: {len(user_id_map)}")
-    print(f"📁 Данные: {DATA_DIR}")
-    print("="*50 + "\n")
-    
-    await dp.start_polling(bot)
+    try:
+        if not os.path.exists(ADMIN_MODE_FILE):
+            set_admin_accepting(True)
+        
+        for admin in ADMINS:
+            if admin not in user_id_map:
+                get_user_id_counter(admin)
+        
+        asyncio.create_task(cleanup_old_messages())
+        
+        print("\n" + "="*50)
+        print("🤖 БОТ ЗАПУЩЕН!")
+        print("="*50)
+        print(f"👤 Админы: {ADMINS}")
+        print(f"📢 Канал: {CHANNEL_ID}")
+        print(f"👥 Пользователей: {len(user_id_map)}")
+        print(f"📁 Данные: {DATA_DIR}")
+        print(f"🔒 Блокировка: {LOCK_FILE}")
+        print("="*50 + "\n")
+        
+        await dp.start_polling(bot)
+        
+    except Exception as e:
+        logging.error(f"Критическая ошибка: {e}")
+    finally:
+        # Освобождаем блокировку при завершении
+        release_lock(lock_file)
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n🛑 Бот остановлен")
+        release_lock(lock_file)
+    except Exception as e:
+        print(f"\n❌ Ошибка: {e}")
+        release_lock(lock_file)
