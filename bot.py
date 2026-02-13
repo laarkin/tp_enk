@@ -1,14 +1,31 @@
-import asyncio
-import logging
 import os
+import sys
+import logging
+import asyncio
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils.markdown import hbold, hcode
 
+# Определяем папку для данных (Railway volume)
+if os.path.exists('/app/data'):
+    DATA_DIR = '/app/data'
+else:
+    DATA_DIR = '.'
+
+# Пути к файлам с данными
+USER_ID_FILE = os.path.join(DATA_DIR, "user_id_map.txt")
+POST_COUNTER_FILE = os.path.join(DATA_DIR, "post_number.txt")
+ADMIN_MODE_FILE = os.path.join(DATA_DIR, "admin_mode.txt")
+
+# Токен из переменных окружения
 TOKEN = os.environ.get("BOT_TOKEN")
-ADMINS = [972486843]
-CHANNEL_ID = -1003774797100
+if not TOKEN:
+    print("❌ ОШИБКА: BOT_TOKEN не найден в переменных окружения!")
+    sys.exit(1)
+
+ADMINS = [972486843]  # Твой ID
+CHANNEL_ID = -1003774797100  # ID канала
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
