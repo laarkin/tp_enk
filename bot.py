@@ -865,26 +865,33 @@ async def decline(cb: types.CallbackQuery):
     await cb.message.delete()
 
 # ---------------- УДАЛЕНИЕ ----------------
+# ---------------- УДАЛЕНИЕ (ИСПРАВЛЕНО ДЛЯ АЛЬБОМОВ) ----------------
 @dp.callback_query(F.data.startswith("delete"))
 async def delete(cb: types.CallbackQuery):
     try:
         parts = cb.data.split(":")
         if len(parts) >= 2:
-            channel_msg_id = int(parts[1])
-            await bot.delete_message(CHANNEL_ID, channel_msg_id)
+            # Получаем ID первого сообщения в альбоме
+            first_msg_id = int(parts[1])
             
-            if len(parts) >= 3 and parts[2] != '0':
+            # Удаляем первое сообщение
+            await bot.delete_message(CHANNEL_ID, first_msg_id)
+            
+            # Пытаемся удалить остальные сообщения альбома (ID +1, +2, +3...)
+            deleted_count = 1
+            for i in range(1, 10):  # Пробуем удалить до 10 сообщений подряд
                 try:
-                    await bot.delete_message(CHANNEL_ID, int(parts[2]))
+                    await bot.delete_message(CHANNEL_ID, first_msg_id + i)
+                    deleted_count += 1
                 except:
-                    pass
+                    break  # Если сообщение не найдено - выходим
             
-            await cb.answer("🗑 Удалено")
+            await cb.answer(f"🗑 Удалено {deleted_count} сообщений")
             
             if cb.message:
                 try:
                     await cb.message.edit_text(
-                        f"{cb.message.text}\n\n❌ {hbold('Пост удален из канала')}",
+                        f"{cb.message.text}\n\n❌ {hbold(f'Пост удален из канала (удалено {deleted_count} сообщений)')}",
                         reply_markup=None,
                         parse_mode="HTML"
                     )
