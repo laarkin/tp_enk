@@ -36,7 +36,7 @@ FOOTER_TEXT = (
     "✉️ <a href='https://t.me/enkspletni_bot'>Анонка</a>"
 )
 
-# ---------------- НОВОЕ: ХРАНИЛИЩЕ МЕДИА ГРУПП ----------------
+# ---------------- ХРАНИЛИЩЕ МЕДИА ГРУПП ----------------
 media_groups = {}  # media_group_id: список сообщений
 user_messages = {}  # Хранилище сообщений пользователей
 
@@ -417,7 +417,7 @@ async def broadcast(message: types.Message):
         parse_mode="HTML"
     )
 
-# ---------------- НОВЫЙ: ОБРАБОТКА МЕДИА ГРУПП (АЛЬБОМОВ) ----------------
+# ---------------- ИСПРАВЛЕННАЯ ОБРАБОТКА МЕДИА ГРУПП (АЛЬБОМОВ) ----------------
 @dp.message(F.media_group_id)
 async def handle_media_group(message: types.Message):
     """Обработка альбомов (несколько фото/видео)"""
@@ -430,30 +430,41 @@ async def handle_media_group(message: types.Message):
     
     media_group_id = message.media_group_id
     
-    # Если это первое сообщение в группе - создаем список
+    # Если это первое сообщение в группе - создаем список и запускаем таймер
     if media_group_id not in media_groups:
-        media_groups[media_group_id] = []
+        media_groups[media_group_id] = {
+            'messages': [],
+            'timer': None,
+            'user_id': telegram_id,
+            'first_message': message
+        }
     
     # Добавляем сообщение в группу
-    media_groups[media_group_id].append(message)
+    media_groups[media_group_id]['messages'].append(message)
     
-    # Ждем немного, чтобы собрать все медиа
-    await asyncio.sleep(0.5)
+    # Отменяем предыдущий таймер если есть
+    if media_groups[media_group_id]['timer']:
+        media_groups[media_group_id]['timer'].cancel()
     
-    # Проверяем, все ли сообщения собраны
-    if len(media_groups[media_group_id]) >= 10:  # Максимум 10 медиа в альбоме
-        await process_media_group(media_group_id)
+    # Создаем новый таймер на 1 секунду
+    loop = asyncio.get_event_loop()
+    timer = loop.call_later(1.0, lambda: asyncio.create_task(process_media_group(media_group_id)))
+    media_groups[media_group_id]['timer'] = timer
 
 async def process_media_group(media_group_id: str):
     """Обработка собранного альбома"""
     
-    messages = media_groups.get(media_group_id, [])
-    if not messages:
+    group_data = media_groups.get(media_group_id)
+    if not group_data:
         return
     
-    # Берем первое сообщение для получения информации о пользователе
-    first_msg = messages[0]
-    telegram_id = first_msg.from_user.id
+    messages = group_data['messages']
+    first_msg = group_data['first_message']
+    
+    # Сортируем сообщения по дате
+    messages.sort(key=lambda x: x.date)
+    
+    telegram_id = group_data['user_id']
     user_id_counter = get_user_id_counter(telegram_id)
     post_id = get_next_post_id()
     
@@ -475,6 +486,7 @@ async def process_media_group(media_group_id: str):
     # Отправляем админам
     for admin in ADMINS:
         try:
+            # Текст с информацией
             text = (
                 "━━━━━━━━━━━━━━━━━━━━━\n"
                 "📨 **ПРИШЛО АНОНИМНОЕ СООБЩЕНИЕ (АЛЬБОМ)**\n"
@@ -494,32 +506,47 @@ async def process_media_group(media_group_id: str):
             
             await bot.send_message(admin, text, parse_mode="Markdown")
             
-            # Создаем группу медиа для отправки
+            # СОЗДАЕМ МЕДИА-ГРУППУ ДЛЯ ОТПРАВКИ
             media_group = []
+            
             for i, msg in enumerate(messages):
                 if msg.photo:
                     file_id = msg.photo[-1].file_id
                     if i == 0:
-                        media_group.append(types.InputMediaPhoto(
-                            media=file_id,
-                            caption=msg.caption or f"📸 Альбом | Пост #{post_id}",
-                            parse_mode="HTML"
-                        ))
+                        # Только первое медиа с подписью
+                        media_group.append(
+                            types.InputMediaPhoto(
+                                media=file_id,
+                                caption=first_msg.caption or f"📸 Альбом | Пост #{post_id}",
+                                parse_mode="HTML"
+                            )
+                        )
                     else:
-                        media_group.append(types.InputMediaPhoto(media=file_id))
+                        media_group.append(
+                            types.InputMediaPhoto(
+                                media=file_id
+                            )
+                        )
                 elif msg.video:
                     file_id = msg.video.file_id
                     if i == 0:
-                        media_group.append(types.InputMediaVideo(
-                            media=file_id,
-                            caption=msg.caption or f"🎬 Альбом | Пост #{post_id}",
-                            parse_mode="HTML"
-                        ))
+                        media_group.append(
+                            types.InputMediaVideo(
+                                media=file_id,
+                                caption=first_msg.caption or f"🎬 Альбом | Пост #{post_id}",
+                                parse_mode="HTML"
+                            )
+                        )
                     else:
-                        media_group.append(types.InputMediaVideo(media=file_id))
+                        media_group.append(
+                            types.InputMediaVideo(
+                                media=file_id
+                            )
+                        )
             
-            # Отправляем альбом админу
-            await bot.send_media_group(admin, media_group)
+            # Отправляем ВЕСЬ альбом одним сообщением
+            if media_group:
+                await bot.send_media_group(admin, media_group)
             
             # Отправляем кнопки отдельным сообщением
             await bot.send_message(
@@ -652,48 +679,68 @@ async def approve(cb: types.CallbackQuery):
         
         # Проверяем, это альбом или одиночное сообщение
         if user_msg.get('type') == 'media_group':
-            # Публикуем альбом
+            # Публикуем альбом в канал
             media_group = []
             messages = user_msg['messages']
+            
+            # Сортируем сообщения по дате
+            messages.sort(key=lambda x: x.date)
             
             for i, msg in enumerate(messages):
                 if msg.photo:
                     file_id = msg.photo[-1].file_id
                     if i == 0:
+                        # Только первое медиа с подписью и футером
                         caption = msg.caption or ""
                         caption += footer
-                        media_group.append(types.InputMediaPhoto(
-                            media=file_id,
-                            caption=caption,
-                            parse_mode="HTML"
-                        ))
+                        media_group.append(
+                            types.InputMediaPhoto(
+                                media=file_id,
+                                caption=caption,
+                                parse_mode="HTML"
+                            )
+                        )
                     else:
-                        media_group.append(types.InputMediaPhoto(media=file_id))
+                        media_group.append(
+                            types.InputMediaPhoto(
+                                media=file_id
+                            )
+                        )
                 elif msg.video:
                     file_id = msg.video.file_id
                     if i == 0:
                         caption = msg.caption or ""
                         caption += footer
-                        media_group.append(types.InputMediaVideo(
-                            media=file_id,
-                            caption=caption,
-                            parse_mode="HTML"
-                        ))
+                        media_group.append(
+                            types.InputMediaVideo(
+                                media=file_id,
+                                caption=caption,
+                                parse_mode="HTML"
+                            )
+                        )
                     else:
-                        media_group.append(types.InputMediaVideo(media=file_id))
+                        media_group.append(
+                            types.InputMediaVideo(
+                                media=file_id
+                            )
+                        )
             
-            # Отправляем альбом в канал
-            channel_msgs = await bot.send_media_group(CHANNEL_ID, media_group)
-            
-            # Кнопка удаления для админа
-            await cb.message.answer(
-                f"✅ {hbold('Альбом опубликован!')}\n\n"
-                f"📝 Номер поста: {hcode(str(post_id))}\n"
-                f"🆔 ID пользователя: {hcode(str(user_id_counter))}\n"
-                f"🖼 Количество медиа: {len(messages)}",
-                reply_markup=published_keyboard(channel_msgs[0].message_id),
-                parse_mode="HTML"
-            )
+            # Отправляем ВЕСЬ альбом в канал одним сообщением
+            if media_group:
+                channel_msgs = await bot.send_media_group(CHANNEL_ID, media_group)
+                
+                # Кнопка удаления для админа
+                await cb.message.answer(
+                    f"✅ {hbold('Альбом опубликован!')}\n\n"
+                    f"📝 Номер поста: {hcode(str(post_id))}\n"
+                    f"🆔 ID пользователя: {hcode(str(user_id_counter))}\n"
+                    f"🖼 Количество медиа: {len(messages)}",
+                    reply_markup=published_keyboard(channel_msgs[0].message_id),
+                    parse_mode="HTML"
+                )
+            else:
+                await cb.answer("❌ Нет медиа в альбоме")
+                return
             
         else:
             # Публикуем одиночное сообщение
