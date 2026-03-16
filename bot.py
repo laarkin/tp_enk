@@ -13,11 +13,9 @@ from aiogram.utils.markdown import hbold, hcode
 from aiogram.exceptions import TelegramBadRequest, TelegramConflictError
 from contextlib import contextmanager
 
-# Определяем папку для данных (Railway volume)
-if os.path.exists('/app/data'):
-    DATA_DIR = '/app/data'
-else:
-    DATA_DIR = '.'
+# Определяем папку для данных (рядом со скриптом)
+DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
+os.makedirs(DATA_DIR, exist_ok=True)
 
 # Пути к файлам с данными
 USER_ID_FILE = os.path.join(DATA_DIR, "user_id_map.txt")
