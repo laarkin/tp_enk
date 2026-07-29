@@ -25,7 +25,7 @@ REPLY_COUNTER_FILE = os.path.join(DATA_DIR, "reply_counter.txt")
 LOCK_FILE = os.path.join(DATA_DIR, "bot.lock")  # Файл блокировки
 
 # Токен из переменных окружения
-TOKEN = "8333848471:AAEgwjFPv2K0zsewXDUumkLSHYzTHX_JaCw"
+TOKEN = "8333848471:AAGWllr1hLXTOD_rnwkJ3W34juYR56nQl0k"
 if not TOKEN:
     print("❌ ОШИБКА: BOT_TOKEN не найден в переменных окружения!")
     sys.exit(1)
